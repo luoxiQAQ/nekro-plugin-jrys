@@ -63,9 +63,10 @@ def _rates(prefix: str) -> dict:
     }
 
 
-async def build_poster(user_id: str, salt: str = "") -> Tuple[Path, dict]:
+async def build_poster(user_id: str, salt: str = "", chat_key: str = "") -> Tuple[Path, dict]:
     """生成该用户的今日运势海报，返回 (图片路径, 运势条目)
 
+    chat_key 用于区分群聊，使各群运势与改命次数互相独立；
     salt 非空时用于「逆天改命」——在当天固定种子上追加盐，从而重抽出一个新结果。
     """
     avatar_path, background_result = await asyncio.gather(
@@ -88,6 +89,9 @@ async def build_poster(user_id: str, salt: str = "") -> Tuple[Path, dict]:
         logger.warning(f"获取头像失败，将生成无头像海报: {avatar_path}")
         avatar_path = None
 
+    # 未显式传盐时，沿用该频道内今天最近一次改命的结果，避免被原始种子顶回去
+    effective_salt = salt or resources.active_reborn_salt(chat_key, user_id)
+
     entry, is_holiday = draw_fortune(
         load_deck(),
         user_id,
@@ -96,12 +100,13 @@ async def build_poster(user_id: str, salt: str = "") -> Tuple[Path, dict]:
         holidays=list(config.HOLIDAYS),
         normal_rates=_rates("NORMAL"),
         holiday_rates=_rates("HOLIDAY"),
-        salt=salt,
+        salt=effective_salt,
+        channel=chat_key,
     )
     if is_holiday:
         logger.info(f"命中节假日爆率配置，用户 {user_id} 使用节假日权重")
 
-    out_path = resources.poster_path(user_id, salt=salt)
+    out_path = resources.poster_path(user_id, salt=effective_salt, chat_key=chat_key)
     poster = await asyncio.to_thread(
         painter.render,
         user_id,
@@ -116,7 +121,7 @@ async def build_poster(user_id: str, salt: str = "") -> Tuple[Path, dict]:
         raise JrysError("生成图片失败，请稍后再试～")
 
     # 背景原图转交 jrys_last 管理，不再按临时文件清理
-    resources.remember_background(user_id, background_path, should_cleanup)
+    resources.remember_background(chat_key, user_id, background_path, should_cleanup)
     return poster, entry
 
 
@@ -137,7 +142,7 @@ async def jrys_command(
 ) -> CommandResponse:
     user_id, _nickname = _resolve_target(target, context.user_id)
     try:
-        poster, entry = await build_poster(user_id)
+        poster, entry = await build_poster(user_id, chat_key=context.chat_key)
     except JrysError as e:
         return CmdCtl.failed(str(e))
     except Exception as e:
@@ -160,7 +165,7 @@ async def jrys_command(
     category="娱乐",
 )
 async def jrys_last_command(context: CommandExecutionContext) -> CommandResponse:
-    record = resources.last_background(context.user_id)
+    record = resources.last_background(context.chat_key, context.user_id)
     if not record:
         return CmdCtl.failed("你还没有生成过今日运势哦，先发送 /jrys 生成一张吧！")
 
@@ -191,26 +196,27 @@ async def reborn_command(
         return CmdCtl.failed("逆天改命当前已被关闭，请等待管理员开启～")
 
     user_id, _nickname = _resolve_target(target, context.user_id)
+    chat_key = context.chat_key
     limit = max(0, int(config.REBORN_DAILY_LIMIT))
 
-    remaining = resources.reborn_remaining(user_id, limit)
+    remaining = resources.reborn_remaining(chat_key, user_id, limit)
     if remaining <= 0:
         return CmdCtl.failed(
-            f"今天 {limit} 次改命机会已经用完啦，明天再来吧～\n天命难违，不如安心过好今天。"
+            f"本群今天 {limit} 次改命机会已经用完啦，明天再来吧～\n天命难违，不如安心过好今天。"
         )
 
-    salt = resources.consume_reborn(user_id)
+    salt = resources.consume_reborn(chat_key, user_id)
     try:
-        poster, entry = await build_poster(user_id, salt=salt)
+        poster, entry = await build_poster(user_id, salt=salt, chat_key=chat_key)
     except JrysError as e:
-        resources.refund_reborn(user_id)
+        resources.refund_reborn(chat_key, user_id)
         return CmdCtl.failed(str(e))
     except Exception as e:
-        resources.refund_reborn(user_id)
+        resources.refund_reborn(chat_key, user_id)
         logger.exception(f"逆天改命失败: {e}")
         return CmdCtl.failed("改命失败，请稍后再试～")
 
-    left = resources.reborn_remaining(user_id, limit)
+    left = resources.reborn_remaining(chat_key, user_id, limit)
     return CmdCtl.success(
         [
             CommandOutputSegment(
@@ -249,7 +255,7 @@ async def jrys_poster(_ctx: AgentCtx, user_id: str = "", user_name: str = "") ->
         return "无法确定目标用户，请提供 QQ 号后重试"
 
     try:
-        poster, entry = await build_poster(target_id)
+        poster, entry = await build_poster(target_id, chat_key=_ctx.chat_key)
     except JrysError as e:
         return f"生成失败: {e}"
     except Exception as e:
@@ -297,17 +303,18 @@ async def jrys_reborn(_ctx: AgentCtx, user_id: str = "", user_name: str = "") ->
         return "无法确定目标用户，请提供 QQ 号后重试"
 
     limit = max(0, int(config.REBORN_DAILY_LIMIT))
-    if resources.reborn_remaining(target_id, limit) <= 0:
-        return f"该用户今天的 {limit} 次改命机会已用完，无法再次改命"
+    chat_key = _ctx.chat_key
+    if resources.reborn_remaining(chat_key, target_id, limit) <= 0:
+        return f"该用户在本群今天的 {limit} 次改命机会已用完，无法再次改命"
 
-    salt = resources.consume_reborn(target_id)
+    salt = resources.consume_reborn(chat_key, target_id)
     try:
-        poster, entry = await build_poster(target_id, salt=salt)
+        poster, entry = await build_poster(target_id, salt=salt, chat_key=chat_key)
     except JrysError as e:
-        resources.refund_reborn(target_id)
+        resources.refund_reborn(chat_key, target_id)
         return f"改命失败: {e}"
     except Exception as e:
-        resources.refund_reborn(target_id)
+        resources.refund_reborn(chat_key, target_id)
         logger.exception(f"逆天改命失败: {e}")
         return "改命失败，请稍后再试"
 
@@ -317,7 +324,7 @@ async def jrys_reborn(_ctx: AgentCtx, user_id: str = "", user_name: str = "") ->
         logger.exception(f"发送改命海报失败: {e}")
         return f"新海报已生成但发送失败: {e}"
 
-    left = resources.reborn_remaining(target_id, limit)
+    left = resources.reborn_remaining(chat_key, target_id, limit)
     who = user_name or target_id
     return (
         f"已为 {who} 完成逆天改命，新的今日运势已发送。\n"
@@ -349,7 +356,7 @@ async def jrys_keyword_handler(_ctx: AgentCtx, message_: ChatMessage) -> Optiona
 
     logger.info(f"关键词触发今日运势: {message_.sender_name}({user_id})")
     try:
-        poster, _entry = await build_poster(user_id)
+        poster, _entry = await build_poster(user_id, chat_key=message_.chat_key)
         await message.send_image(message_.chat_key, str(poster), _ctx, record=True)
     except JrysError as e:
         await message.send_text(message_.chat_key, str(e), _ctx, record=False)
@@ -369,30 +376,31 @@ async def _handle_keyword_reborn(
         return
 
     limit = max(0, int(config.REBORN_DAILY_LIMIT))
-    if resources.reborn_remaining(user_id, limit) <= 0:
+    chat_key = message_.chat_key
+    if resources.reborn_remaining(chat_key, user_id, limit) <= 0:
         await message.send_text(
             message_.chat_key,
-            f"今天 {limit} 次改命机会已经用完啦，明天再来吧～",
+            f"本群今天 {limit} 次改命机会已经用完啦，明天再来吧～",
             _ctx,
             record=False,
         )
         return
 
     logger.info(f"关键词触发逆天改命: {message_.sender_name}({user_id})")
-    salt = resources.consume_reborn(user_id)
+    salt = resources.consume_reborn(chat_key, user_id)
     try:
-        poster, entry = await build_poster(user_id, salt=salt)
+        poster, entry = await build_poster(user_id, salt=salt, chat_key=chat_key)
     except JrysError as e:
-        resources.refund_reborn(user_id)
+        resources.refund_reborn(chat_key, user_id)
         await message.send_text(message_.chat_key, str(e), _ctx, record=False)
         return
     except Exception as e:
-        resources.refund_reborn(user_id)
+        resources.refund_reborn(chat_key, user_id)
         logger.exception(f"关键词触发逆天改命失败: {e}")
         await message.send_text(message_.chat_key, "改命失败，请稍后再试～", _ctx, record=False)
         return
 
-    left = resources.reborn_remaining(user_id, limit)
+    left = resources.reborn_remaining(chat_key, user_id, limit)
     await message.send_text(
         message_.chat_key,
         f"⚡ 逆天改命成功！{_summary_text(entry)}（剩余 {left}/{limit}）",

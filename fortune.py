@@ -26,16 +26,19 @@ def draw_fortune(
     holiday_rates: Dict[str, int],
     now: datetime | None = None,
     salt: str = "",
+    channel: str = "",
 ) -> Tuple[Dict[str, Any], bool]:
     """抽取一条运势文案，返回 (文案条目, 是否命中节假日权重)
 
-    fixed_daily 为真时结果由 user_id + 日期决定（同一天固定）；
+    fixed_daily 为真时结果由 user_id + 频道 + 日期决定（同一人在同一频道内当天固定）；
+    channel 用于区分不同群聊，使各群运势互相独立；
     salt 用于「逆天改命」——在固定种子后追加盐，从而在当天重抽出一个新结果。
     """
     now = now or datetime.now()
     rng = random.Random()
     if fixed_daily:
-        rng.seed(f"{user_id}-{now.strftime('%Y-%m-%d')}{salt}")
+        scope = f"-{channel}" if channel else ""
+        rng.seed(f"{user_id}{scope}-{now.strftime('%Y-%m-%d')}{salt}")
 
     valid_keys = [k for k in deck if not k.startswith("_")]
     if not valid_keys:
