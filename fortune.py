@@ -25,12 +25,17 @@ def draw_fortune(
     normal_rates: Dict[str, int],
     holiday_rates: Dict[str, int],
     now: datetime | None = None,
+    salt: str = "",
 ) -> Tuple[Dict[str, Any], bool]:
-    """抽取一条运势文案，返回 (文案条目, 是否命中节假日权重)"""
+    """抽取一条运势文案，返回 (文案条目, 是否命中节假日权重)
+
+    fixed_daily 为真时结果由 user_id + 日期决定（同一天固定）；
+    salt 用于「逆天改命」——在固定种子后追加盐，从而在当天重抽出一个新结果。
+    """
     now = now or datetime.now()
     rng = random.Random()
     if fixed_daily:
-        rng.seed(f"{user_id}-{now.strftime('%Y-%m-%d')}")
+        rng.seed(f"{user_id}-{now.strftime('%Y-%m-%d')}{salt}")
 
     valid_keys = [k for k in deck if not k.startswith("_")]
     if not valid_keys:

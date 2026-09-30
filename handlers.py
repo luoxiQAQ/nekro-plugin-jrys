@@ -30,6 +30,7 @@ resources = JrysResources(config)
 painter = FortunePainter(config)
 
 KEYWORDS = {"jrys", "今日运势", "运势"}
+REBORN_KEYWORDS = {"逆天改命", "改命"}
 _AT_MARKUP = re.compile(r"\[@(?:id:)?(?P<uid>\d+)(?:;nickname:(?P<nickname>[^@\]\n]+))?@\]")
 _PLAIN_UID = re.compile(r"\d{5,12}")
 
@@ -62,8 +63,11 @@ def _rates(prefix: str) -> dict:
     }
 
 
-async def build_poster(user_id: str) -> Tuple[Path, dict]:
-    """生成该用户的今日运势海报，返回 (图片路径, 运势条目)"""
+async def build_poster(user_id: str, salt: str = "") -> Tuple[Path, dict]:
+    """生成该用户的今日运势海报，返回 (图片路径, 运势条目)
+
+    salt 非空时用于「逆天改命」——在当天固定种子上追加盐，从而重抽出一个新结果。
+    """
     avatar_path, background_result = await asyncio.gather(
         resources.get_avatar_img(user_id),
         resources.get_background_image(),
@@ -92,11 +96,12 @@ async def build_poster(user_id: str) -> Tuple[Path, dict]:
         holidays=list(config.HOLIDAYS),
         normal_rates=_rates("NORMAL"),
         holiday_rates=_rates("HOLIDAY"),
+        salt=salt,
     )
     if is_holiday:
         logger.info(f"命中节假日爆率配置，用户 {user_id} 使用节假日权重")
 
-    out_path = resources.poster_path(user_id)
+    out_path = resources.poster_path(user_id, salt=salt)
     poster = await asyncio.to_thread(
         painter.render,
         user_id,
@@ -171,6 +176,56 @@ async def jrys_last_command(context: CommandExecutionContext) -> CommandResponse
     )
 
 
+@plugin.mount_command(
+    name="逆天改命",
+    description="逆天改命：重新抽取今日运势，每天限指定次数",
+    aliases=["改命"],
+    usage="逆天改命 [@用户或QQ号]",
+    category="娱乐",
+)
+async def reborn_command(
+    context: CommandExecutionContext,
+    target: Annotated[str, Arg("目标用户（@提及或 QQ 号），留空为自己", positional=True)] = "",
+) -> CommandResponse:
+    if not config.REBORN_ENABLED:
+        return CmdCtl.failed("逆天改命当前已被关闭，请等待管理员开启～")
+
+    user_id, _nickname = _resolve_target(target, context.user_id)
+    limit = max(0, int(config.REBORN_DAILY_LIMIT))
+
+    remaining = resources.reborn_remaining(user_id, limit)
+    if remaining <= 0:
+        return CmdCtl.failed(
+            f"今天 {limit} 次改命机会已经用完啦，明天再来吧～\n天命难违，不如安心过好今天。"
+        )
+
+    salt = resources.consume_reborn(user_id)
+    try:
+        poster, entry = await build_poster(user_id, salt=salt)
+    except JrysError as e:
+        resources.refund_reborn(user_id)
+        return CmdCtl.failed(str(e))
+    except Exception as e:
+        resources.refund_reborn(user_id)
+        logger.exception(f"逆天改命失败: {e}")
+        return CmdCtl.failed("改命失败，请稍后再试～")
+
+    left = resources.reborn_remaining(user_id, limit)
+    return CmdCtl.success(
+        [
+            CommandOutputSegment(
+                type=CommandOutputSegmentType.TEXT,
+                text=(
+                    f"⚡ 逆天改命成功！新的运势已降临\n"
+                    f"{_summary_text(entry)}\n"
+                    f"今日剩余改命次数：{left}/{limit}"
+                ),
+            ),
+            CommandOutputSegment(type=CommandOutputSegmentType.IMAGE, file_path=str(poster)),
+        ]
+    )
+
+
 @plugin.mount_sandbox_method(
     SandboxMethodType.AGENT,
     name="生成今日运势海报",
@@ -216,18 +271,81 @@ async def jrys_poster(_ctx: AgentCtx, user_id: str = "", user_name: str = "") ->
     )
 
 
+@plugin.mount_sandbox_method(
+    SandboxMethodType.AGENT,
+    name="逆天改命重抽运势",
+    description="为用户重新抽取今日运势并发送新海报，每天有次数上限，结果完全随机可能变差",
+)
+async def jrys_reborn(_ctx: AgentCtx, user_id: str = "", user_name: str = "") -> str:
+    """逆天改命：重新抽取今日运势并发送到聊天 (use lang: zh-CN)
+
+    **应用场景: 用户对当天运势不满意、明确要求改命 / 重抽 / 再来一次时使用**
+    **注意: 每个用户每天有次数上限，用完即无法再改；新结果完全随机，可能比原来更差**
+
+    Args:
+        user_id (str): 目标用户的 QQ 号；留空则取当前消息的发送者
+        user_name (str): 目标用户昵称，仅用于日志与文案，可留空
+
+    Returns:
+        str: 生成结果与运势摘要
+    """
+    if not config.REBORN_ENABLED:
+        return "逆天改命功能当前已被关闭，无法使用"
+
+    target_id = (user_id or "").strip() or (_ctx.from_platform_userid or "")
+    if not target_id:
+        return "无法确定目标用户，请提供 QQ 号后重试"
+
+    limit = max(0, int(config.REBORN_DAILY_LIMIT))
+    if resources.reborn_remaining(target_id, limit) <= 0:
+        return f"该用户今天的 {limit} 次改命机会已用完，无法再次改命"
+
+    salt = resources.consume_reborn(target_id)
+    try:
+        poster, entry = await build_poster(target_id, salt=salt)
+    except JrysError as e:
+        resources.refund_reborn(target_id)
+        return f"改命失败: {e}"
+    except Exception as e:
+        resources.refund_reborn(target_id)
+        logger.exception(f"逆天改命失败: {e}")
+        return "改命失败，请稍后再试"
+
+    try:
+        await message.send_image(_ctx.chat_key, str(poster), _ctx, record=True)
+    except Exception as e:
+        logger.exception(f"发送改命海报失败: {e}")
+        return f"新海报已生成但发送失败: {e}"
+
+    left = resources.reborn_remaining(target_id, limit)
+    who = user_name or target_id
+    return (
+        f"已为 {who} 完成逆天改命，新的今日运势已发送。\n"
+        f"{entry.get('fortuneSummary', '')} {entry.get('luckyStar', '')}\n"
+        f"签文: {entry.get('signText', '')}\n"
+        f"今日剩余改命次数: {left}/{limit}\n"
+        "请自然地告知用户改命结果，不要重复描述图片细节。"
+    )
+
+
 @plugin.mount_on_user_message()
 async def jrys_keyword_handler(_ctx: AgentCtx, message_: ChatMessage) -> Optional[MsgSignal]:
     """群内单独发送关键词时直接出图，并阻止该消息唤醒 AI"""
     if not config.KEYWORD_ENABLED:
         return None
 
-    if message_.content_text.strip() not in KEYWORDS:
+    content = message_.content_text.strip()
+    is_reborn = content in REBORN_KEYWORDS
+    if content not in KEYWORDS and not is_reborn:
         return None
 
     user_id = message_.sender_id or message_.platform_userid or ""
     if not user_id:
         return None
+
+    if is_reborn:
+        await _handle_keyword_reborn(_ctx, message_, content, user_id)
+        return MsgSignal.BLOCK_TRIGGER
 
     logger.info(f"关键词触发今日运势: {message_.sender_name}({user_id})")
     try:
@@ -240,6 +358,51 @@ async def jrys_keyword_handler(_ctx: AgentCtx, message_: ChatMessage) -> Optiona
         await message.send_text(message_.chat_key, "生成运势失败，请稍后再试～", _ctx, record=False)
 
     return MsgSignal.BLOCK_TRIGGER
+
+
+async def _handle_keyword_reborn(
+    _ctx: AgentCtx, message_: ChatMessage, content: str, user_id: str
+) -> None:
+    """群内关键词触发逆天改命"""
+    if not config.REBORN_ENABLED:
+        await message.send_text(message_.chat_key, "逆天改命当前已被关闭～", _ctx, record=False)
+        return
+
+    limit = max(0, int(config.REBORN_DAILY_LIMIT))
+    if resources.reborn_remaining(user_id, limit) <= 0:
+        await message.send_text(
+            message_.chat_key,
+            f"今天 {limit} 次改命机会已经用完啦，明天再来吧～",
+            _ctx,
+            record=False,
+        )
+        return
+
+    logger.info(f"关键词触发逆天改命: {message_.sender_name}({user_id})")
+    salt = resources.consume_reborn(user_id)
+    try:
+        poster, entry = await build_poster(user_id, salt=salt)
+    except JrysError as e:
+        resources.refund_reborn(user_id)
+        await message.send_text(message_.chat_key, str(e), _ctx, record=False)
+        return
+    except Exception as e:
+        resources.refund_reborn(user_id)
+        logger.exception(f"关键词触发逆天改命失败: {e}")
+        await message.send_text(message_.chat_key, "改命失败，请稍后再试～", _ctx, record=False)
+        return
+
+    left = resources.reborn_remaining(user_id, limit)
+    await message.send_text(
+        message_.chat_key,
+        f"⚡ 逆天改命成功！{_summary_text(entry)}（剩余 {left}/{limit}）",
+        _ctx,
+        record=False,
+    )
+    try:
+        await message.send_image(message_.chat_key, str(poster), _ctx, record=True)
+    except Exception as e:
+        logger.exception(f"发送改命海报失败: {e}")
 
 
 @plugin.mount_init_method()

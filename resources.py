@@ -196,7 +196,10 @@ class JrysResources:
 
     # ---------------------------------------------------------- 生成图路径
 
-    def poster_path(self, user_id: str) -> Path:
+    def poster_path(self, user_id: str, salt: str = "") -> Path:
+        """生成图路径；改命时带盐，避免覆盖当天已生成的海报"""
+        if salt:
+            return self.poster_dir / f"jrys_{user_id}_{sha256(salt.encode('utf-8')).hexdigest()[:12]}.jpg"
         return self.poster_dir / f"jrys_{user_id}.jpg"
 
     # -------------------------------------------------------------- 状态
@@ -226,6 +229,41 @@ class JrysResources:
 
     def last_background(self, user_id: str) -> Optional[Dict[str, Any]]:
         return self.load_state().get("last_images", {}).get(user_id)
+
+    # ---------------------------------------------------------- 逆天改命
+
+    def _reborn_record(self, user_id: str) -> Dict[str, Any]:
+        """取某用户的改命记录，日期变了就自动重置"""
+        state = self.load_state()
+        reborn = state.setdefault("reborn", {})
+        today = datetime.now().strftime("%Y-%m-%d")
+        record = reborn.get(user_id)
+        if not isinstance(record, dict) or record.get("date") != today:
+            record = {"date": today, "used": 0, "salt": ""}
+            reborn[user_id] = record
+        return record
+
+    def reborn_remaining(self, user_id: str, daily_limit: int) -> int:
+        """今日剩余改命次数"""
+        record = self._reborn_record(user_id)
+        return max(0, int(daily_limit) - int(record.get("used", 0)))
+
+    def consume_reborn(self, user_id: str) -> str:
+        """消耗一次改命机会，返回本次用于重抽的盐（同时作为历史留痕）"""
+        record = self._reborn_record(user_id)
+        record["used"] = int(record.get("used", 0)) + 1
+        # 盐里带上次数与随机值，保证每次改命都能抽出不同的结果
+        salt = f"-reborn{record['used']}-{uuid4().hex}"
+        record["salt"] = salt
+        self.save_state()
+        return salt
+
+    def refund_reborn(self, user_id: str) -> None:
+        """出图失败时把次数退回，避免白扣"""
+        record = self._reborn_record(user_id)
+        if int(record.get("used", 0)) > 0:
+            record["used"] = int(record.get("used", 0)) - 1
+            self.save_state()
 
     def remember_background(self, user_id: str, background_path: str, should_cleanup: bool) -> None:
         state = self.load_state()

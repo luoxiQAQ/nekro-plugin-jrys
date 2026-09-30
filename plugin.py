@@ -10,8 +10,8 @@ from nekro_agent.api.plugin import ConfigBase, ExtraField, NekroPlugin
 plugin = NekroPlugin(
     name="今日运势",
     module_name="jrys",
-    description="生成今日运势海报，包含运势、幸运星、宜忌与解签文本",
-    version="1.0.0",
+    description="生成今日运势海报，包含运势、幸运星、宜忌与解签文本，支持逆天改命重抽",
+    version="1.1.0",
     author="ominus",
     url="https://github.com/luoxiQAQ/nekro-plugin-jrys",
     i18n_name=i18n.i18n_text(
@@ -324,6 +324,30 @@ class JrysConfig(ConfigBase):
             i18n_description=i18n.i18n_text(
                 zh_CN="节假日凶运（<56 分）的抽取权重",
                 en_US="Draw weight of bad luck (<56) on holidays",
+            ),
+        ).model_dump(),
+    )
+    REBORN_ENABLED: bool = Field(
+        default=True,
+        title="启用逆天改命",
+        description="开启后用户可用 /逆天改命 在当天重抽运势，结果完全随机（可能变差）",
+        json_schema_extra=ExtraField(
+            i18n_title=i18n.i18n_text(zh_CN="启用逆天改命", en_US="Enable Fate Reborn"),
+            i18n_description=i18n.i18n_text(
+                zh_CN="开启后用户可用 /逆天改命 在当天重抽运势，结果完全随机（可能变差）",
+                en_US="When enabled, users can re-roll today's fortune with /逆天改命; the result is fully random (may get worse)",
+            ),
+        ).model_dump(),
+    )
+    REBORN_DAILY_LIMIT: int = Field(
+        default=2,
+        title="逆天改命每日次数",
+        description="每个用户每天可改命的次数，默认 2 次",
+        json_schema_extra=ExtraField(
+            i18n_title=i18n.i18n_text(zh_CN="逆天改命每日次数", en_US="Daily Reborn Limit"),
+            i18n_description=i18n.i18n_text(
+                zh_CN="每个用户每天可改命的次数，默认 2 次",
+                en_US="Number of times a user can re-roll fortune per day, default 2",
             ),
         ).model_dump(),
     )
