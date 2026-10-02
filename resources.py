@@ -1,4 +1,4 @@
-"""头像 / 背景图 / 生成图的获取、缓存与状态管理"""
+﻿"""头像 / 背景图 / 生成图的获取、缓存与状态管理"""
 
 import asyncio
 import json
@@ -257,12 +257,18 @@ class JrysResources:
         record = self._reborn_record(chat_key, user_id)
         return max(0, int(daily_limit) - int(record.get("used", 0)))
 
-    def consume_reborn(self, chat_key: str, user_id: str) -> str:
-        """消耗一次改命机会，返回本次用于重抽的盐（同时作为历史留痕）"""
+    def consume_reborn(self, chat_key: str, user_id: str, limit: int) -> Optional[str]:
+        """Atomically check limit and consume one reborn charge.
+
+        Returns the salt on success, or None if the limit is exceeded.
+        """
         record = self._reborn_record(chat_key, user_id)
-        record["used"] = int(record.get("used", 0)) + 1
-        # 盐里带上次数与随机值，保证每次改命都能抽出不同的结果
-        salt = f"-reborn{record['used']}-{uuid4().hex}"
+        used = int(record.get("used", 0))
+        if used >= limit:
+            return None
+        salt = f"-reborn{used + 1}-{uuid4().hex}"
+        record["prev_salt"] = record.get("salt", "")
+        record["used"] = used + 1
         record["salt"] = salt
         self.save_state()
         return salt
@@ -272,6 +278,9 @@ class JrysResources:
         record = self._reborn_record(chat_key, user_id)
         if int(record.get("used", 0)) > 0:
             record["used"] = int(record.get("used", 0)) - 1
+            prev_salt = record.get("prev_salt", "")
+            record["salt"] = prev_salt
+            record.pop("prev_salt", None)
             self.save_state()
 
     def active_reborn_salt(self, chat_key: str, user_id: str) -> str:

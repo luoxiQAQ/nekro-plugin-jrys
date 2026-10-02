@@ -1,4 +1,4 @@
-"""命令、AI 工具与关键词触发入口"""
+﻿"""命令、AI 工具与关键词触发入口"""
 
 import asyncio
 import os
@@ -199,13 +199,11 @@ async def reborn_command(
     chat_key = context.chat_key
     limit = max(0, int(config.REBORN_DAILY_LIMIT))
 
-    remaining = resources.reborn_remaining(chat_key, user_id, limit)
-    if remaining <= 0:
+    salt = resources.consume_reborn(chat_key, user_id, limit)
+    if salt is None:
         return CmdCtl.failed(
             f"本群今天 {limit} 次改命机会已经用完啦，明天再来吧～\n天命难违，不如安心过好今天。"
         )
-
-    salt = resources.consume_reborn(chat_key, user_id)
     try:
         poster, entry = await build_poster(user_id, salt=salt, chat_key=chat_key)
     except JrysError as e:
@@ -304,10 +302,9 @@ async def jrys_reborn(_ctx: AgentCtx, user_id: str = "", user_name: str = "") ->
 
     limit = max(0, int(config.REBORN_DAILY_LIMIT))
     chat_key = _ctx.chat_key
-    if resources.reborn_remaining(chat_key, target_id, limit) <= 0:
+    salt = resources.consume_reborn(chat_key, target_id, limit)
+    if salt is None:
         return f"该用户在本群今天的 {limit} 次改命机会已用完，无法再次改命"
-
-    salt = resources.consume_reborn(chat_key, target_id)
     try:
         poster, entry = await build_poster(target_id, salt=salt, chat_key=chat_key)
     except JrysError as e:
@@ -377,7 +374,8 @@ async def _handle_keyword_reborn(
 
     limit = max(0, int(config.REBORN_DAILY_LIMIT))
     chat_key = message_.chat_key
-    if resources.reborn_remaining(chat_key, user_id, limit) <= 0:
+    salt = resources.consume_reborn(chat_key, user_id, limit)
+    if salt is None:
         await message.send_text(
             message_.chat_key,
             f"本群今天 {limit} 次改命机会已经用完啦，明天再来吧～",
@@ -387,7 +385,6 @@ async def _handle_keyword_reborn(
         return
 
     logger.info(f"关键词触发逆天改命: {message_.sender_name}({user_id})")
-    salt = resources.consume_reborn(chat_key, user_id)
     try:
         poster, entry = await build_poster(user_id, salt=salt, chat_key=chat_key)
     except JrysError as e:
